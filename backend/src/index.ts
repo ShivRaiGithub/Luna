@@ -79,8 +79,8 @@ app.get('/health', (_req, res) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     timestamp: new Date().toISOString(),
     endpoints: {
-      auth: ['/auth/request-otp', '/auth/verify-otp', '/auth/login', '/auth/me'],
-      wallet: ['/wallet/store-shards', '/wallet/get-shards', '/wallet/update-shards', '/wallet/check'],
+      auth: ['/auth/request-otp', '/auth/verify-otp', '/auth/verify-otp-existing', '/auth/login', '/auth/me'],
+      wallet: ['/wallet/store-shards', '/wallet/get-shards', '/wallet/update-shards', '/wallet/reset-password', '/wallet/check'],
     },
   });
 });

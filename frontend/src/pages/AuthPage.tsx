@@ -4,6 +4,7 @@ import StarField from '../components/StarField';
 import LunaLogo from '../components/LunaLogo';
 import { useWalletStore } from '../store/walletStore';
 import { authApi, walletApi, setToken } from '../utils/api';
+import { readLocalLogin, localLoginMatchesEmail, writeLocalLogin } from '../utils/localLogin';
 
 type AuthStep =
   | 'form'           // email + send OTP
@@ -11,6 +12,7 @@ type AuthStep =
   | 'new_wallet'     // new user: enter password + backupPass
   | 'creating'       // wallet creation animation
   | 'download'       // force backup file download
+  | 'local_unlock'   // returning user on same device: password only
   | 'existing_wallet'// returning user: upload backup + enter password
   | 'recover'        // recover on new device: email + OTP first
   | 'recover_otp'    // recover OTP verification
@@ -30,7 +32,7 @@ interface BackupFile {
 const AuthPage: React.FC = () => {
   const { mode } = useParams<{ mode: 'login' | 'signup' | 'recover' | 'forgot' }>();
   const navigate = useNavigate();
-  const { createWalletSplit, recoverWallet, resetPassword, setSession } = useWalletStore();
+  const { createWalletSplit, recoverWallet, unlockWithLocalPassword } = useWalletStore();
 
   const [step, setStep] = useState<AuthStep>(() => {
     if (mode === 'recover') return 'recover';
@@ -42,7 +44,6 @@ const AuthPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [backupPass, setBackupPass] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [newBackupPass, setNewBackupPass] = useState('');
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -52,6 +53,60 @@ const AuthPage: React.FC = () => {
   const [jwtToken, setJwtToken] = useState<string | null>(null);
   const [hasWallet, setHasWallet] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadLocalLoginContext = async () => {
+    if (mode !== 'login') return;
+
+    const local = await readLocalLogin();
+    if (local?.email) {
+      setEmail(local.email);
+      setStep('local_unlock');
+    }
+  };
+
+  React.useEffect(() => {
+    // Keep UI in sync when only the route param changes (same component instance).
+    setError('');
+    setOtp('');
+    setHasWallet(false);
+    setJwtToken(null);
+
+    if (mode === 'recover') {
+      setStep('recover');
+      return;
+    }
+
+    if (mode === 'forgot') {
+      setStep('forgot');
+      return;
+    }
+
+    setStep('form');
+    void loadLocalLoginContext();
+  }, [mode]);
+
+  const handleLocalUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email) {
+      setError('Please enter your email');
+      return;
+    }
+    if (!password) {
+      setError('Please enter your password');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      await unlockWithLocalPassword(email, password);
+      navigate('/app/wallet');
+    } catch (err: any) {
+      setError(err.message || 'Failed to unlock wallet');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // ── Signup: Send OTP ─────────────────────────────────────────────────────
   const handleSendOtp = async (e: React.FormEvent) => {
@@ -79,9 +134,15 @@ const AuthPage: React.FC = () => {
       setJwtToken(result.token);
 
       if (result.hasWallet) {
-        // Returning user — needs backup file + password
+        // Returning user on this device can unlock with password only
         setHasWallet(true);
-        setStep('existing_wallet');
+        const local = await readLocalLogin();
+        if (localLoginMatchesEmail(local, email)) {
+          setStep('local_unlock');
+        } else {
+          // No local encrypted key on this device: require recovery flow
+          setStep('existing_wallet');
+        }
       } else {
         // New user — create wallet
         setStep('new_wallet');
@@ -291,8 +352,7 @@ const AuthPage: React.FC = () => {
       }
 
       // Combine str1_1 (server) + str1_2 (file) and decrypt with password
-      await recoverWallet(shards.str1_1, uploadedBackup.str1_2, password);
-      await setSession(email, useWalletStore.getState().sessionPrivateKey!);
+      await recoverWallet(email, shards.str1_1, uploadedBackup.str1_2, password);
       navigate('/app/wallet');
     } catch (err: any) {
       setError(err.message || 'Failed to recover wallet. Check your password and backup file.');
@@ -322,7 +382,7 @@ const AuthPage: React.FC = () => {
     setLoading(true);
     setError('');
     try {
-      const result = await authApi.verifyOTP(email, otp);
+      const result = await authApi.verifyOTPExisting(email, otp);
       await setToken(result.token);
       setJwtToken(result.token);
       setStep('forgot_unlock');
@@ -348,92 +408,27 @@ const AuthPage: React.FC = () => {
       setError('New password must be at least 6 characters');
       return;
     }
-    if (!newBackupPass || newBackupPass.length < 6) {
-      setError('New backup password must be at least 6 characters');
-      return;
-    }
 
     setLoading(true);
     setError('');
     setStep('forgot_creating');
 
     try {
-      // Request OTP for shard retrieval
-      await authApi.requestOTP(email);
-      // Need OTP to fetch shards
-      setStep('forgot_otp');
-      // We'll set a flag to know this is the second OTP (for shard fetch)
-      setHasWallet(true);
-      setLoading(false);
-      return;
+      if (!jwtToken) {
+        throw new Error('Session expired. Please verify OTP again.');
+      }
+
+      // Single-forgot flow: backend fetches shards, decrypts with backup credentials, rotates login shard.
+      const result = await walletApi.resetPassword(backupPass, newPassword, uploadedBackup.str2_2);
+      await writeLocalLogin(email, result.encryptedStr1);
+
+      setBackupFileContent(result.backupFileContent);
+      setBackupDownloaded(false);
+      setStep('download');
     } catch (err: any) {
       setError(err.message || 'Failed to reset password');
       setStep('forgot_unlock');
-      setLoading(false);
-    }
-  };
-
-  // ── Forgot: Fetch shards with OTP, decrypt with backupPass, re-encrypt ──
-  const handleForgotFetchAndReset = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
-    try {
-      let currentToken = jwtToken;
-      if (!currentToken) {
-        const result = await authApi.verifyOTP(email, otp);
-        await setToken(result.token);
-        setJwtToken(result.token);
-        currentToken = result.token;
-        await authApi.requestOTP(email);
-        setOtp('');
-        setHasWallet(true);
-        setLoading(false);
-        return;
-      }
-
-      // Fetch shards with OTP
-      const shards = await walletApi.getShards(otp);
-
-      if (!uploadedBackup) {
-        setError('Please upload your backup file');
-        setLoading(false);
-        return;
-      }
-
-      setStep('forgot_creating');
-
-      // Decrypt with backup password, re-encrypt with new password
-      const result = await resetPassword(
-        shards.str2_1,
-        uploadedBackup.str2_2,
-        backupPass,
-        newPassword,
-        newBackupPass
-      );
-
-      // Request new OTP for updating shards
-      await authApi.requestOTP(email);
-      // We need another OTP round to update shards — but to simplify,
-      // we use the same OTP verification pattern.
-      // For now, update shards (server will require a new OTP)
-      // Actually, let's request and wait for a new OTP
-      setBackupFileContent(result.backupFileContent);
-
-      // Store updated shards - need another OTP
-      // For simplicity, we'll request OTP and then update
-      setStep('forgot_otp');
-      setOtp('');
-      // Store the shard data to update after next OTP
-      (window as any).__luna_pending_update = {
-        newStr1_1: result.newStr1_1,
-        newStr2_1: result.newStr2_1,
-      };
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message || 'Failed to reset password. Check your backup password and file.');
-      setStep('forgot_unlock');
+    } finally {
       setLoading(false);
     }
   };
@@ -445,29 +440,9 @@ const AuthPage: React.FC = () => {
     setError('');
 
     try {
-      const pendingUpdate = (window as any).__luna_pending_update;
-
-      if (pendingUpdate) {
-        // This is the forgot-password update-shards OTP
-        await walletApi.updateShards(pendingUpdate.newStr1_1, pendingUpdate.newStr2_1, otp);
-        delete (window as any).__luna_pending_update;
-
-        // Show download screen for new backup
-        setStep('download');
-        setBackupDownloaded(false);
-        setLoading(false);
-        return;
-      }
-
       if (step === 'recover_otp' && hasWallet && uploadedBackup) {
         // This is the recover shard-fetch OTP
         await handleFetchShardsAndDecrypt(e);
-        return;
-      }
-
-      if (step === 'forgot_otp' && hasWallet && uploadedBackup && backupPass) {
-        // This is the forgot shard-fetch OTP
-        await handleForgotFetchAndReset(e);
         return;
       }
 
@@ -544,8 +519,8 @@ const AuthPage: React.FC = () => {
               subtitle={
                 step === 'recover_otp' && hasWallet
                   ? 'Enter the verification code to access your wallet shards'
-                  : step === 'forgot_otp' && hasWallet
-                  ? 'Enter the verification code to proceed with password reset'
+                  : step === 'forgot_otp'
+                  ? 'Enter the verification code to continue password reset'
                   : undefined
               }
             />
@@ -589,9 +564,9 @@ const AuthPage: React.FC = () => {
           {/* ── Existing wallet login ─────────────────────────────────── */}
           {step === 'existing_wallet' && (
             <>
-              <h2 style={headingStyle}>Welcome back</h2>
+              <h2 style={headingStyle}>Recover wallet on this device</h2>
               <p style={subtitleStyle}>
-                Upload your backup file and enter your password to access your wallet.
+                This device does not have your local wallet data yet. Upload your backup file and verify OTP once.
               </p>
               <form onSubmit={handleExistingLogin} style={formStyle}>
                 <FileUploadField
@@ -619,6 +594,48 @@ const AuthPage: React.FC = () => {
             </>
           )}
 
+          {/* ── Same-device login: password only ──────────────────────── */}
+          {step === 'local_unlock' && (
+            <>
+              <h2 style={headingStyle}>Welcome back</h2>
+              <p style={subtitleStyle}>
+                Enter your wallet password to unlock on this device.
+              </p>
+              <form onSubmit={handleLocalUnlock} style={formStyle}>
+                <InputField
+                  label="Email"
+                  type="email"
+                  value={email}
+                  onChange={setEmail}
+                  placeholder="you@example.com"
+                  required
+                />
+                <InputField
+                  label="Password"
+                  type="password"
+                  value={password}
+                  onChange={setPassword}
+                  placeholder="Enter your wallet password"
+                  required
+                />
+                {error && <p style={errorStyle}>{error}</p>}
+                <SubmitButton
+                  loading={loading}
+                  text="UNLOCK WALLET"
+                  loadingText="UNLOCKING..."
+                />
+              </form>
+              <p style={{ textAlign: 'center', marginTop: 20, fontSize: 13, color: 'var(--text-muted)' }}>
+                Need to recover on a new device?{' '}
+                <Link to="/auth/recover" style={linkStyle}>Use OTP + backup recovery</Link>
+              </p>
+              <p style={{ textAlign: 'center', marginTop: 8, fontSize: 13, color: 'var(--text-muted)' }}>
+                Forgot password?{' '}
+                <Link to="/auth/forgot" style={linkStyle}>Reset with backup password</Link>
+              </p>
+            </>
+          )}
+
           {/* ── Initial form (email entry) ────────────────────────────── */}
           {step === 'form' && (
             <>
@@ -627,7 +644,7 @@ const AuthPage: React.FC = () => {
               </h2>
               <p style={subtitleStyle}>
                 {mode === 'login'
-                  ? 'Sign in with your email to access your wallet.'
+                  ? 'Sign in with email verification.'
                   : 'Sign up with email — no seed phrase required.'}
               </p>
               <form onSubmit={handleSendOtp} style={formStyle}>
@@ -750,7 +767,7 @@ const AuthPage: React.FC = () => {
             </>
           )}
 
-          {/* ── Forgot: Upload backup + backupPass + new passwords ───── */}
+          {/* ── Forgot: Upload backup + backupPass + new password ─────── */}
           {step === 'forgot_unlock' && (
             <>
               <h2 style={headingStyle}>Reset your password</h2>
@@ -778,14 +795,6 @@ const AuthPage: React.FC = () => {
                   value={newPassword}
                   onChange={setNewPassword}
                   placeholder="Create a new password"
-                  required
-                />
-                <InputField
-                  label="New Backup Password"
-                  type="password"
-                  value={newBackupPass}
-                  onChange={setNewBackupPass}
-                  placeholder="Create a new backup password"
                   required
                 />
                 {error && <p style={errorStyle}>{error}</p>}

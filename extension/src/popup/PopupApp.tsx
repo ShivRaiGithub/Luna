@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { AddressSet } from '../utils/addressDerivation';
 import { getBalance, type BalanceResponse } from '../utils/midnight';
 
-type Screen = 'loading' | 'onboard' | 'onboard_otp' | 'new_wallet' | 'download_backup' | 'existing_wallet' | 'existing_otp' | 'recover' | 'recover_otp' | 'forgot' | 'forgot_otp' | 'forgot_unlock' | 'forgot_shard_otp' | 'locked' | 'wallet' | 'connect_request' | 'tx_request';
+type Screen = 'loading' | 'onboard' | 'onboard_otp' | 'new_wallet' | 'download_backup' | 'existing_wallet' | 'existing_otp' | 'recover' | 'recover_otp' | 'forgot' | 'forgot_otp' | 'forgot_unlock' | 'locked' | 'wallet' | 'connect_request' | 'tx_request';
 type Tab = 'home' | 'send' | 'receive' | 'settings';
 type Network = 'mainnet' | 'preprod' | 'preview' | 'undeployed';
 type TokenKind = 'NIGHT';
@@ -11,6 +11,7 @@ interface PendingConnectionPayload { id: string; origin: string; name: string; }
 interface PendingTxPayload { id: string; sessionId?: string; to: string; amount: string; memo?: string; }
 interface RequestState { kind: 'connect' | 'tx'; payload: PendingConnectionPayload | PendingTxPayload; }
 interface BackupFile { str1_2: string; str2_2: string; email: string; version: number; }
+interface LocalLoginRecord { email: string; encryptedPrivateKey: string; version: number; updatedAt: number; }
 
 const API_BASE = 'http://localhost:3001';
 const NETWORKS: Network[] = ['mainnet', 'preprod', 'preview', 'undeployed'];
@@ -19,6 +20,10 @@ function normalizeStoredNetwork(network: string | null | undefined): Network {
   if (network === 'localnet' || network === 'undeployed' || !network) return 'undeployed';
   if (network === 'mainnet' || network === 'preprod' || network === 'preview') return network;
   return 'undeployed';
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
 const ui = {
@@ -57,6 +62,34 @@ async function readStorage<T extends string>(keys: T[]): Promise<Record<T, any>>
 
 async function writeStorage(values: Record<string, any>): Promise<void> {
   await chrome.storage.local.set(values);
+}
+
+async function readLocalLoginRecord(): Promise<LocalLoginRecord | null> {
+  const store = await chrome.storage.local.get('luna_local_login');
+  const raw = store.luna_local_login as Partial<LocalLoginRecord> | undefined;
+  if (!raw?.email || !raw?.encryptedPrivateKey) return null;
+
+  return {
+    email: normalizeEmail(raw.email),
+    encryptedPrivateKey: raw.encryptedPrivateKey,
+    version: Number(raw.version || 1),
+    updatedAt: Number(raw.updatedAt || Date.now()),
+  };
+}
+
+async function writeLocalLoginRecord(email: string, encryptedPrivateKey: string): Promise<void> {
+  const payload: LocalLoginRecord = {
+    email: normalizeEmail(email),
+    encryptedPrivateKey,
+    version: 1,
+    updatedAt: Date.now(),
+  };
+  await chrome.storage.local.set({ luna_local_login: payload });
+}
+
+function localLoginMatches(record: LocalLoginRecord | null, email: string): boolean {
+  if (!record) return false;
+  return record.email === normalizeEmail(email);
 }
 
 async function deriveAddressesViaBackground(network: Network, privateKey?: string): Promise<AddressSet> {
@@ -171,11 +204,9 @@ const PopupApp: React.FC = () => {
   const [setupPassword, setSetupPassword] = useState('');
   const [backupPassInput, setBackupPassInput] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
-  const [newBackupPassInput, setNewBackupPassInput] = useState('');
   const [uploadedBackup, setUploadedBackup] = useState<BackupFile | null>(null);
   const [backupFileContent, setBackupFileContent] = useState<string | null>(null);
   const [backupDownloaded, setBackupDownloaded] = useState(false);
-  const [pendingShardUpdate, setPendingShardUpdate] = useState<{str1_1: string; str2_1: string} | null>(null);
 
   // Wallet state
   const [sendTo, setSendTo] = useState('');
@@ -235,8 +266,18 @@ const PopupApp: React.FC = () => {
     const savedToken = stored.luna_jwt || null;
     setToken(savedToken);
     setEmail(stored.luna_email || null);
+    const localLogin = await readLocalLoginRecord();
 
-    if (!savedToken) { setScreen('onboard'); return; }
+    if (!savedToken) {
+      if (localLogin && stored.luna_address) {
+        setAddress(stored.luna_address || null);
+        setAddresses(stored.luna_addresses || fallbackAddressSet(stored.luna_address));
+        setScreen('locked');
+      } else {
+        setScreen('onboard');
+      }
+      return;
+    }
 
     try { await apiRequest('/auth/me', {}, savedToken); } catch {
       await chrome.storage.local.remove(['luna_jwt', 'luna_email', 'luna_address', 'luna_addresses', 'luna_unlocked']);
@@ -250,13 +291,13 @@ const PopupApp: React.FC = () => {
     const savedAddress = stored.luna_address || null;
     const savedAddresses = stored.luna_addresses || (savedAddress ? fallbackAddressSet(savedAddress) : null);
 
-    if (!savedAddress || !savedAddresses) { setScreen('locked'); return; }
+    if (!savedAddress || !savedAddresses) { setScreen(localLogin ? 'locked' : 'onboard'); return; }
     setAddress(savedAddress); setAddresses(savedAddresses);
 
     if (stored.luna_unlocked && savedPk) {
       setScreen('wallet');
       await refreshBalance(savedToken, savedAddress, savedNetwork, savedAddresses);
-    } else { setScreen('locked'); }
+    } else { setScreen(localLogin ? 'locked' : 'onboard'); }
   }
 
   useEffect(() => { void boot(); }, []);
@@ -302,7 +343,17 @@ const PopupApp: React.FC = () => {
       const result = await apiRequest<{ token: string; user: { email: string }; hasWallet: boolean }>('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail, otp: otpCode }) });
       setToken(result.token); setEmail(result.user.email);
       await writeStorage({ luna_jwt: result.token, luna_email: result.user.email });
-      if (result.hasWallet) { setScreen('existing_wallet'); setStatusText('Upload your backup file and enter password.'); }
+      if (result.hasWallet) {
+        const localLogin = await readLocalLoginRecord();
+        if (localLoginMatches(localLogin, result.user.email)) {
+          setOtpEmail(result.user.email);
+          setScreen('locked');
+          setStatusText('Enter your wallet password to unlock.');
+        } else {
+          setScreen('existing_wallet');
+          setStatusText('Upload your backup file and enter password.');
+        }
+      }
       else { setScreen('new_wallet'); }
     } catch (err: any) { setStatusText(presentError(err)); } finally { setBusy(false); }
   }
@@ -320,6 +371,7 @@ const PopupApp: React.FC = () => {
       const [s2_1, s2_2] = splitString(str2);
 
       await apiRequest('/wallet/store-shards', { method: 'POST', body: JSON.stringify({ str1_1: s1_1, str2_1: s2_1 }) }, token);
+      await writeLocalLoginRecord(otpEmail, str1);
 
       const backup = JSON.stringify({ str1_2: s1_2, str2_2: s2_2, email: otpEmail, version: 2 }, null, 2);
       setBackupFileContent(backup);
@@ -349,6 +401,7 @@ const PopupApp: React.FC = () => {
       const shards = await apiRequest<{ str1_1: string; str2_1: string }>('/wallet/get-shards', { method: 'POST', body: JSON.stringify({ otp: otpCode }) }, token);
       const fullStr = combineStrings(shards.str1_1, uploadedBackup!.str1_2);
       const pk = await decryptKey(fullStr, setupPassword);
+      await writeLocalLoginRecord(otpEmail || email || uploadedBackup!.email, fullStr);
       setSessionPrivateKey(pk);
       await chrome.storage.session.set({ luna_session_private_key: pk });
       const nextAddrs = await ensureAddress(token!, network, pk);
@@ -384,6 +437,7 @@ const PopupApp: React.FC = () => {
       const shards = await apiRequest<{ str1_1: string; str2_1: string }>('/wallet/get-shards', { method: 'POST', body: JSON.stringify({ otp: otpCode }) }, token);
       const fullStr = combineStrings(shards.str1_1, uploadedBackup.str1_2);
       const pk = await decryptKey(fullStr, setupPassword);
+      await writeLocalLoginRecord(otpEmail || email || uploadedBackup.email, fullStr);
       setSessionPrivateKey(pk);
       await chrome.storage.session.set({ luna_session_private_key: pk });
       const nextAddrs = await ensureAddress(token, network, pk);
@@ -406,7 +460,7 @@ const PopupApp: React.FC = () => {
   async function forgotVerifyOtp() {
     setBusy(true); setStatusText('');
     try {
-      const result = await apiRequest<{ token: string; user: { email: string } }>('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail, otp: otpCode }) });
+      const result = await apiRequest<{ token: string; user: { email: string } }>('/auth/verify-otp-existing', { method: 'POST', body: JSON.stringify({ email: otpEmail, otp: otpCode }) });
       setToken(result.token); setEmail(result.user.email);
       await writeStorage({ luna_jwt: result.token, luna_email: result.user.email });
       setScreen('forgot_unlock');
@@ -417,49 +471,28 @@ const PopupApp: React.FC = () => {
     if (!uploadedBackup) { setStatusText('Upload backup file'); return; }
     if (!backupPassInput) { setStatusText('Enter backup password'); return; }
     if (!newPasswordInput || newPasswordInput.length < 6) { setStatusText('New password must be at least 6 characters'); return; }
-    if (!newBackupPassInput || newBackupPassInput.length < 6) { setStatusText('New backup password must be at least 6 characters'); return; }
+    if (!token) { setStatusText('Session expired. Verify OTP again.'); return; }
+
     setBusy(true); setStatusText('');
     try {
-      await apiRequest('/auth/request-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail }) }, token);
-      setScreen('forgot_shard_otp'); setOtpCode(''); setStatusText('Enter OTP to fetch shards and reset password');
-    } catch (err: any) { setStatusText(presentError(err)); } finally { setBusy(false); }
-  }
+      const result = await apiRequest<{ encryptedStr1: string; backupFileContent: string }>(
+        '/wallet/reset-password',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            backupPass: backupPassInput,
+            newPassword: newPasswordInput,
+            str2_2: uploadedBackup.str2_2,
+          }),
+        },
+        token
+      );
 
-  async function forgotFetchAndReset() {
-    setBusy(true); setStatusText('');
-    try {
-      const shards = await apiRequest<{ str1_1: string; str2_1: string }>('/wallet/get-shards', { method: 'POST', body: JSON.stringify({ otp: otpCode }) }, token);
-      const fullStr2 = combineStrings(shards.str2_1, uploadedBackup!.str2_2);
-      const pk = await decryptKey(fullStr2, backupPassInput);
-
-      const newStr1 = await encryptKey(pk, newPasswordInput);
-      const newStr2 = await encryptKey(pk, newBackupPassInput);
-      const [ns1_1, ns1_2] = splitString(newStr1);
-      const [ns2_1, ns2_2] = splitString(newStr2);
-
-      await apiRequest('/auth/request-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail }) }, token);
-      setPendingShardUpdate({ str1_1: ns1_1, str2_1: ns2_1 });
-
-      const backup = JSON.stringify({ str1_2: ns1_2, str2_2: ns2_2, email: otpEmail, version: 2 }, null, 2);
-      setBackupFileContent(backup);
-
-      setSessionPrivateKey(pk);
-      await chrome.storage.session.set({ luna_session_private_key: pk });
-      const nextAddrs = await ensureAddress(token!, network, pk);
-      setAddress(nextAddrs.shielded); setAddresses(nextAddrs);
-
-      setOtpCode(''); setStatusText('Enter OTP to save updated shards');
-    } catch (err: any) { setStatusText(presentError(err)); } finally { setBusy(false); }
-  }
-
-  async function forgotUpdateShards() {
-    if (!pendingShardUpdate) return;
-    setBusy(true); setStatusText('');
-    try {
-      await apiRequest('/wallet/update-shards', { method: 'POST', body: JSON.stringify({ ...pendingShardUpdate, otp: otpCode }) }, token);
-      setPendingShardUpdate(null);
-      await writeStorage({ luna_unlocked: true });
-      setScreen('download_backup'); setBackupDownloaded(false);
+      await writeLocalLoginRecord(otpEmail || email || uploadedBackup.email, result.encryptedStr1);
+      setBackupFileContent(result.backupFileContent);
+      setBackupDownloaded(false);
+      setScreen('download_backup');
+      setStatusText('Password reset complete. Download your updated backup file.');
     } catch (err: any) { setStatusText(presentError(err)); } finally { setBusy(false); }
   }
 
@@ -508,15 +541,48 @@ const PopupApp: React.FC = () => {
     setSessionPrivateKey(null);
     await chrome.storage.session.remove('luna_session_private_key');
     await writeStorage({ luna_unlocked: false });
-    setScreen('onboard');
+    setScreen('locked');
   }
 
   async function logout() {
-    await chrome.storage.local.remove(['luna_jwt', 'luna_email', 'luna_address', 'luna_addresses', 'luna_unlocked', 'luna_network']);
+    await chrome.storage.local.remove(['luna_jwt', 'luna_email', 'luna_address', 'luna_addresses', 'luna_unlocked', 'luna_network', 'luna_local_login']);
     await chrome.storage.session.remove('luna_session_private_key');
     setToken(null); setSessionPrivateKey(null); setEmail(null); setAddress(null); setAddresses(null);
     setBalance('0'); setOtpCode(''); setOtpEmail(''); setSetupPassword(''); setUploadedBackup(null);
     setScreen('onboard');
+  }
+
+  async function unlockWithLocalPassword() {
+    if (!setupPassword) { setStatusText('Enter your wallet password'); return; }
+
+    setBusy(true);
+    setStatusText('');
+    try {
+      const localLogin = await readLocalLoginRecord();
+      const loginEmail = otpEmail || email || '';
+      if (!localLogin || !localLoginMatches(localLogin, loginEmail)) {
+        setStatusText('No local wallet found for this email. Use Recover Wallet.');
+        setBusy(false);
+        return;
+      }
+
+      const pk = await decryptKey(localLogin.encryptedPrivateKey, setupPassword);
+      setSessionPrivateKey(pk);
+      await chrome.storage.session.set({ luna_session_private_key: pk });
+
+      const nextAddrs = await ensureAddress(token || '', network, pk);
+      setAddress(nextAddrs.shielded);
+      setAddresses(nextAddrs);
+      await writeStorage({ luna_unlocked: true, luna_email: loginEmail || localLogin.email });
+
+      setScreen('wallet');
+      setActiveTab('home');
+      await refreshBalance(token || '', nextAddrs.shielded, network, nextAddrs);
+    } catch (err: any) {
+      setStatusText('Invalid password. Try again.');
+    } finally {
+      setBusy(false);
+    }
   }
 
   // ── Hidden file input ─────────────────────────────────────────────────
@@ -635,27 +701,23 @@ const PopupApp: React.FC = () => {
 
         {screen === 'forgot_unlock' && (
           <div style={{ display: 'grid', gap: 10 }}>
-            <div style={ui.card}><p style={{ fontSize: 13, lineHeight: 1.5 }}>Upload backup file, enter your <strong>backup password</strong>, and set new passwords.</p></div>
+            <div style={ui.card}><p style={{ fontSize: 13, lineHeight: 1.5 }}>Upload backup file, enter your <strong>backup password</strong>, and set a new wallet password.</p></div>
             <button onClick={() => fileInputRef.current?.click()} style={ui.button}>{uploadedBackup ? `✓ ${uploadedBackup.email}` : '📁 Upload Backup File'}</button>
             <input type="password" value={backupPassInput} onChange={(e) => setBackupPassInput(e.target.value)} placeholder="Backup password" style={ui.input} />
             <input type="password" value={newPasswordInput} onChange={(e) => setNewPasswordInput(e.target.value)} placeholder="New password (min 6)" style={ui.input} />
-            <input type="password" value={newBackupPassInput} onChange={(e) => setNewBackupPassInput(e.target.value)} placeholder="New backup password" style={ui.input} />
             <button disabled={busy || !uploadedBackup} onClick={() => void forgotResetPassword()} style={ui.buttonPrimary}>{busy ? 'Processing...' : 'Reset Password'}</button>
-          </div>
-        )}
-
-        {screen === 'forgot_shard_otp' && (
-          <div style={{ display: 'grid', gap: 10 }}>
-            <div style={ui.card}><p style={{ fontSize: 13 }}>{pendingShardUpdate ? 'Enter OTP to save updated wallet shards' : 'Enter OTP to fetch shards and reset password'}</p></div>
-            <input value={otpCode} onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))} maxLength={6} placeholder="000000" style={{ ...ui.input, textAlign: 'center', fontSize: 20, letterSpacing: '0.3em' }} />
-            <button disabled={busy || otpCode.length !== 6} onClick={() => void (pendingShardUpdate ? forgotUpdateShards() : forgotFetchAndReset())} style={ui.buttonPrimary}>{busy ? 'Processing...' : 'Verify'}</button>
           </div>
         )}
 
         {screen === 'locked' && (
           <div style={{ display: 'grid', gap: 10 }}>
-            <div style={ui.card}><p style={{ fontSize: 13, opacity: 0.95 }}>Session expired. Sign in again.</p></div>
-            <button onClick={() => void logout()} style={ui.buttonPrimary}>Sign In</button>
+            <div style={ui.card}><p style={{ fontSize: 13, opacity: 0.95 }}>Enter your wallet password to unlock this device.</p></div>
+            <input type="email" value={otpEmail} onChange={(e) => setOtpEmail(e.target.value)} placeholder={email || 'Email'} style={ui.input} />
+            <input type="password" value={setupPassword} onChange={(e) => setSetupPassword(e.target.value)} placeholder="Wallet password" style={ui.input} />
+            <button disabled={busy || !setupPassword} onClick={() => void unlockWithLocalPassword()} style={ui.buttonPrimary}>{busy ? 'Unlocking...' : 'Unlock Wallet'}</button>
+            <button onClick={() => setScreen('recover')} style={ui.button}>Use Recover Wallet</button>
+            <button onClick={() => setScreen('forgot')} style={ui.button}>Forgot Password</button>
+            <button onClick={() => void logout()} style={ui.button}>Sign In with OTP</button>
           </div>
         )}
 

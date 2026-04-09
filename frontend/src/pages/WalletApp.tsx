@@ -539,17 +539,6 @@ const SendTab: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             }}
           />
         </div>
-        <div style={{
-          padding: '12px',
-          borderRadius: 10,
-          border: '1px solid rgba(103,232,249,0.2)',
-          background: 'var(--cyan-dim)',
-          fontSize: 13,
-          color: 'var(--cyan)',
-          fontFamily: 'var(--font-mono)',
-        }}>
-          🔐 This transaction will be ZK-proven on Midnight Network
-        </div>
         <button
           type="submit"
           disabled={sending}
@@ -722,7 +711,6 @@ const SettingsTab: React.FC<{ email: string | null; onBack: () => void }> = ({ e
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <SettingRow icon="👤" label="Account" value={email || 'Unknown'} />
-        <SettingRow icon="🔄" label="Add Account" onClick={addAccount} />
         <div style={{ height: 1, background: 'var(--border)', margin: '8px 0' }} />
         <SettingRow
           icon="🔒"

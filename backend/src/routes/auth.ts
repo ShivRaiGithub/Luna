@@ -131,6 +131,69 @@ router.post(
   }
 );
 
+// POST /auth/verify-otp-existing — Verify OTP for existing users only (no auto-create)
+router.post(
+  '/verify-otp-existing',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('otp').isLength({ min: 6, max: 6 }).isNumeric(),
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, error: 'Invalid input' } as ApiResponse);
+    }
+
+    const { email, otp } = req.body as { email: string; otp: string };
+
+    try {
+      const record = await OTPModel.findOne({
+        email: email.toLowerCase(),
+        used: false,
+      }).sort({ createdAt: -1 });
+
+      if (!record) {
+        return res.status(400).json({ success: false, error: 'No verification code found for this email' } as ApiResponse);
+      }
+
+      if (isOTPExpired(record.expiresAt)) {
+        return res.status(400).json({ success: false, error: 'Verification code expired' } as ApiResponse);
+      }
+
+      if (record.code !== otp) {
+        return res.status(400).json({ success: false, error: 'Invalid verification code' } as ApiResponse);
+      }
+
+      await OTPModel.deleteMany({ email: email.toLowerCase() });
+
+      const user = await UserModel.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'No account found for this email' } as ApiResponse);
+      }
+
+      const walletShards = await WalletShardModel.findOne({ email: email.toLowerCase() });
+      if (!walletShards) {
+        return res.status(404).json({ success: false, error: 'No wallet found for this email' } as ApiResponse);
+      }
+
+      const token = signToken({ userId: user._id.toString(), email: user.email });
+
+      return res.json({
+        success: true,
+        data: {
+          token,
+          user: { id: user._id.toString(), email: user.email },
+          isNewUser: false,
+          hasWallet: true,
+        },
+      } as ApiResponse);
+    } catch (err) {
+      console.error('[Luna] OTP verify-existing error:', err);
+      return res.status(500).json({ success: false, error: 'Failed to verify code' } as ApiResponse);
+    }
+  }
+);
+
 // POST /auth/login — Send OTP for login (existing user)
 router.post(
   '/login',

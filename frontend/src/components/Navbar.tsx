@@ -37,7 +37,7 @@ const Navbar: React.FC = () => {
 
       {!isApp && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
-          {['Features', 'Security', 'Developers'].map(item => (
+          {['Features', 'Security',].map(item => (
             <a key={item} href={`#${item.toLowerCase()}`} style={{
               fontFamily: 'var(--font-body)',
               fontSize: 14,

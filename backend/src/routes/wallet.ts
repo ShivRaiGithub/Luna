@@ -5,6 +5,7 @@ import { OTPModel } from '../models/OTP';
 import { ApiResponse } from '../utils/types';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { isOTPExpired } from '../utils/auth';
+import { combineStrings, decryptKey, encryptKey, splitString } from '../utils/crypto';
 
 const router = Router();
 
@@ -158,6 +159,69 @@ router.post(
     } catch (err) {
       console.error('[Luna] Update shards error:', err);
       return res.status(500).json({ success: false, error: 'Failed to update wallet shards' } as ApiResponse);
+    }
+  }
+);
+
+// POST /wallet/reset-password — Single-session password reset using backup credentials
+router.post(
+  '/reset-password',
+  [
+    body('backupPass').isString().isLength({ min: 6 }),
+    body('newPassword').isString().isLength({ min: 6 }),
+    body('str2_2').isString().notEmpty(),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, error: 'Invalid reset payload' } as ApiResponse);
+    }
+
+    const { backupPass, newPassword, str2_2 } = req.body as {
+      backupPass: string;
+      newPassword: string;
+      str2_2: string;
+    };
+    const email = req.userEmail!;
+
+    try {
+      const shards = await WalletShardModel.findOne({ email: email.toLowerCase() });
+      if (!shards) {
+        return res.status(404).json({ success: false, error: 'No wallet shards found for this email' } as ApiResponse);
+      }
+
+      const encryptedBackup = combineStrings(shards.str2_1, str2_2);
+      let privateKey: string;
+      try {
+        privateKey = decryptKey(encryptedBackup, backupPass);
+      } catch {
+        return res.status(400).json({ success: false, error: 'Invalid backup password or backup file' } as ApiResponse);
+      }
+
+      const newEncryptedLogin = encryptKey(privateKey, newPassword);
+      const [newStr1_1, newStr1_2] = splitString(newEncryptedLogin);
+
+      // Only rotate the login shard pair. Backup shard pair remains unchanged.
+      shards.str1_1 = newStr1_1;
+      await shards.save();
+
+      const backupFileContent = JSON.stringify({
+        str1_2: newStr1_2,
+        str2_2,
+        email,
+        version: 2,
+      }, null, 2);
+
+      return res.json({
+        success: true,
+        data: {
+          encryptedStr1: newEncryptedLogin,
+          backupFileContent,
+        },
+      } as ApiResponse);
+    } catch (err) {
+      console.error('[Luna] Reset password error:', err);
+      return res.status(500).json({ success: false, error: 'Failed to reset password' } as ApiResponse);
     }
   }
 );

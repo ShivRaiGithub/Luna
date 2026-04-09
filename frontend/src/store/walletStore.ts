@@ -5,6 +5,7 @@ import { generatePrivateKey, encryptKey, decryptKey, splitString, combineStrings
 import { getBalance, type BalanceResponse } from '../utils/midnight';
 import { isLikelyMidnightAddress, deriveAddresses } from '../utils/addressDerivation';
 import { executeInWorker } from '../utils/sdkWorkerClient';
+import { readLocalLogin, writeLocalLogin, localLoginMatchesEmail } from '../utils/localLogin';
 
 interface Account {
   address: string;
@@ -35,6 +36,7 @@ interface WalletState {
 
   /** Recover wallet from server shards + backup file */
   recoverWallet: (
+    email: string,
     str1_1: string,
     str1_2: string,
     password: string
@@ -42,6 +44,7 @@ interface WalletState {
 
   /** Forgot password: decrypt with backup password, re-encrypt with new password */
   resetPassword: (
+    email: string,
     str2_1: string,
     str2_2: string,
     backupPass: string,
@@ -55,6 +58,8 @@ interface WalletState {
 
   /** Set session after successful recovery */
   setSession: (email: string, privateKey: string) => Promise<void>;
+  unlockWithLocalPassword: (email: string, password: string) => Promise<void>;
+  hasLocalLoginForEmail: (email: string) => Promise<boolean>;
 
   lockWallet: () => void;
   setNetwork: (net: 'mainnet' | 'preprod' | 'preview' | 'undeployed') => Promise<void>;
@@ -139,6 +144,7 @@ export const useWalletStore = create<WalletState>()(
         // Encrypt with password (str1) and backupPass (str2)
         const str1 = await encryptKey(privateKey, password);
         const str2 = await encryptKey(privateKey, backupPass);
+        await writeLocalLogin(email, str1);
 
         // Split each into halves
         const [str1_1, str1_2] = splitString(str1);
@@ -179,12 +185,13 @@ export const useWalletStore = create<WalletState>()(
         } as any;
       },
 
-      recoverWallet: async (str1_1, str1_2, password) => {
+      recoverWallet: async (email, str1_1, str1_2, password) => {
         // Combine the two halves
         const encryptedStr = combineStrings(str1_1, str1_2);
 
         // Decrypt with password
         const privateKey = await decryptKey(encryptedStr, password);
+        await writeLocalLogin(email, encryptedStr);
 
         const { network } = get();
         const addresses = await deriveAddresses(network, privateKey);
@@ -199,6 +206,7 @@ export const useWalletStore = create<WalletState>()(
         };
 
         set({
+          email,
           sessionPrivateKey: privateKey,
           currentAddress: addresses.shielded,
           accounts: [account],
@@ -206,7 +214,7 @@ export const useWalletStore = create<WalletState>()(
         });
       },
 
-      resetPassword: async (str2_1, str2_2, backupPass, newPassword, newBackupPass) => {
+      resetPassword: async (email, str2_1, str2_2, backupPass, newPassword, newBackupPass) => {
         // Combine backup-encrypted halves
         const encryptedStr = combineStrings(str2_1, str2_2);
 
@@ -219,8 +227,9 @@ export const useWalletStore = create<WalletState>()(
 
         const [newStr1_1, newStr1_2] = splitString(newStr1);
         const [newStr2_1, newStr2_2] = splitString(newStr2);
+        await writeLocalLogin(email, newStr1);
 
-        const { email, network } = get();
+        const { network } = get();
         const addresses = await deriveAddresses(network, privateKey);
 
         const account: Account = {
@@ -233,6 +242,7 @@ export const useWalletStore = create<WalletState>()(
         };
 
         set({
+          email,
           sessionPrivateKey: privateKey,
           currentAddress: addresses.shielded,
           accounts: [account],
@@ -254,6 +264,39 @@ export const useWalletStore = create<WalletState>()(
       },
 
       setSession: async (email, privateKey) => {
+        const { network } = get();
+        const addresses = await deriveAddresses(network, privateKey);
+
+        const account: Account = {
+          address: addresses.shielded,
+          unshieldedAddress: addresses.unshielded,
+          dustAddress: addresses.dust,
+          name: 'Account 1',
+          balance: '0',
+          dustBalance: '0',
+        };
+
+        set({
+          email,
+          sessionPrivateKey: privateKey,
+          currentAddress: addresses.shielded,
+          accounts: [account],
+          isUnlocked: true,
+        });
+      },
+
+      hasLocalLoginForEmail: async (email) => {
+        const record = await readLocalLogin();
+        return localLoginMatchesEmail(record, email);
+      },
+
+      unlockWithLocalPassword: async (email, password) => {
+        const record = await readLocalLogin();
+        if (!localLoginMatchesEmail(record, email)) {
+          throw new Error('No local wallet found for this email on this device. Use recover wallet flow.');
+        }
+
+        const privateKey = await decryptKey(record!.encryptedPrivateKey, password);
         const { network } = get();
         const addresses = await deriveAddresses(network, privateKey);
 

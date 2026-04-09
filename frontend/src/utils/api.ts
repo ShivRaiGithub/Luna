@@ -41,6 +41,12 @@ export const authApi = {
       { method: 'POST', body: JSON.stringify({ email, otp }) }
     ),
 
+  verifyOTPExisting: (email: string, otp: string) =>
+    request<{ token: string; user: { id: string; email: string }; isNewUser: boolean; hasWallet: boolean }>(
+      '/auth/verify-otp-existing',
+      { method: 'POST', body: JSON.stringify({ email, otp }) }
+    ),
+
   login: (email: string) =>
     request('/auth/login', {
       method: 'POST',
@@ -71,6 +77,13 @@ export const walletApi = {
     request('/wallet/update-shards', {
       method: 'POST',
       body: JSON.stringify({ str1_1, str2_1, otp }),
+    }),
+
+  /** Forgot-password reset: server decrypts with backup credentials and rotates login shard only */
+  resetPassword: (backupPass: string, newPassword: string, str2_2: string) =>
+    request<{ encryptedStr1: string; backupFileContent: string }>('/wallet/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ backupPass, newPassword, str2_2 }),
     }),
 
   /** Check if wallet shards exist for the authenticated user */
