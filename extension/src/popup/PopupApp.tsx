@@ -457,26 +457,22 @@ const PopupApp: React.FC = () => {
     if (!setupPassword) { setStatusText('Enter your password'); return; }
     setBusy(true); setStatusText('');
     try {
-      if (!token) {
-        const result = await apiRequest<{ token: string; user: { email: string } }>('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail, otp: otpCode }) });
-        setToken(result.token); setEmail(result.user.email);
-        await writeStorage({ luna_jwt: result.token, luna_email: result.user.email });
-        await apiRequest('/auth/request-otp', { method: 'POST', body: JSON.stringify({ email: otpEmail }) }, result.token);
-        setOtpCode(''); setStatusText('Enter new OTP to fetch wallet shards');
-        setBusy(false); return;
-      }
-      const shards = await apiRequest<{ str1_1: string; str2_1: string }>('/wallet/get-shards', { method: 'POST', body: JSON.stringify({ otp: otpCode }) }, token);
+      const result = await apiRequest<{ token: string; user: { email: string } }>('/auth/verify-otp-existing', { method: 'POST', body: JSON.stringify({ email: otpEmail, otp: otpCode }) });
+      setToken(result.token); setEmail(result.user.email);
+      await writeStorage({ luna_jwt: result.token, luna_email: result.user.email });
+
+      const shards = await apiRequest<{ str1_1: string; str2_1: string }>('/wallet/get-shards-auth', { method: 'GET' }, result.token);
       const fullStr = combineStrings(shards.str1_1, uploadedBackup.str1_2);
       const pk = await decryptKey(fullStr, setupPassword);
       await writeLocalLoginRecord(otpEmail || email || uploadedBackup.email, fullStr);
       setHasLocalUnlock(true);
       setSessionPrivateKey(pk);
       await chrome.storage.session.set({ luna_session_private_key: pk });
-      const nextAddrs = await ensureAddress(token, network, pk);
+      const nextAddrs = await ensureAddress(result.token, network, pk);
       setAddress(nextAddrs.shielded); setAddresses(nextAddrs);
       await writeStorage({ luna_unlocked: true });
       setScreen('wallet'); setActiveTab('home');
-      await refreshBalance(token, nextAddrs.shielded, network, nextAddrs);
+      await refreshBalance(result.token, nextAddrs.shielded, network, nextAddrs);
     } catch (err: any) { setStatusText(presentError(err)); } finally { setBusy(false); }
   }
 

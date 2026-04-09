@@ -80,7 +80,7 @@ app.get('/health', (_req, res) => {
     timestamp: new Date().toISOString(),
     endpoints: {
       auth: ['/auth/request-otp', '/auth/verify-otp', '/auth/verify-otp-existing', '/auth/login', '/auth/me'],
-      wallet: ['/wallet/store-shards', '/wallet/get-shards', '/wallet/update-shards', '/wallet/reset-password', '/wallet/check'],
+      wallet: ['/wallet/store-shards', '/wallet/get-shards', '/wallet/get-shards-auth', '/wallet/update-shards', '/wallet/reset-password', '/wallet/check'],
     },
   });
 });

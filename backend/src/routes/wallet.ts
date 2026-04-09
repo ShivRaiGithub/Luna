@@ -106,6 +106,29 @@ router.post(
   }
 );
 
+// GET /wallet/get-shards-auth — Retrieve server-side halves for already OTP-verified authenticated session
+router.get('/get-shards-auth', async (req: AuthRequest, res: Response) => {
+  const email = req.userEmail!;
+
+  try {
+    const shards = await WalletShardModel.findOne({ email: email.toLowerCase() });
+    if (!shards) {
+      return res.status(404).json({ success: false, error: 'No wallet shards found for this email' } as ApiResponse);
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        str1_1: shards.str1_1,
+        str2_1: shards.str2_1,
+      },
+    } as ApiResponse);
+  } catch (err) {
+    console.error('[Luna] Get shards auth error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to retrieve wallet shards' } as ApiResponse);
+  }
+});
+
 // POST /wallet/update-shards — Update str1_1 after password reset (requires OTP)
 router.post(
   '/update-shards',
