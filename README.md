@@ -38,7 +38,7 @@ luna/
 ### 1. Clone Repository
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/ShivRaiGithub/Luna
 cd luna
 ```
 
@@ -109,6 +109,14 @@ App URLs:
 4. Select the `extension/dist/` folder
 
 ---
+
+## 📝 HOW SUCH A "WEB2.5" THING IS POSSIBLE:
+1. An instance of the private key is encrypted with user's password and never leaves the user's browser. This allows user to login back into wallet with just the email and password. No OTP or backup file required.
+2. This is how the recovery through backup file and password reset actually works, and how backup file is used (This is where the magic happens):   
+Private key is copied into 2 strings, one encrypted by password while the other with backup pass, both then broken into 2 halves. One pair of halves is stored on server while the other in backup file. Neither can fully construct the private key without the other.   
+Hence, to access the part on server, you need email access and otp. To access the other one, you need the backup file. And to decrypt, you need the password. Not one, but 3 things. That's what makes it secure. Even if the backup file leaks, no one can reconstruct the private key without the password and email access.
+
+
 
 
 ## 🌐 dApp Integration
