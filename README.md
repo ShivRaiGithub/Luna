@@ -2,6 +2,9 @@
 
 Luna is a non-custodial browser wallet for the [Midnight Network](https://midnight.network) that brings Web2-level simplicity to Web3 wallets.
 
+![Luna Page](Luna.png)
+![Extension](Extension.png)
+
 ## ✨ Capabilities
 
 - Login with email

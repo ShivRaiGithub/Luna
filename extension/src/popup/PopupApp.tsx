@@ -197,6 +197,7 @@ const PopupApp: React.FC = () => {
   const [isFetchingBalance, setIsFetchingBalance] = useState(false);
   const [statusText, setStatusText] = useState<string>('');
   const [busy, setBusy] = useState(false);
+  const [hasLocalUnlock, setHasLocalUnlock] = useState(false);
 
   // Auth state
   const [otpEmail, setOtpEmail] = useState('');
@@ -267,11 +268,20 @@ const PopupApp: React.FC = () => {
     setToken(savedToken);
     setEmail(stored.luna_email || null);
     const localLogin = await readLocalLoginRecord();
+    setHasLocalUnlock(!!localLogin);
+    if (localLogin?.email) {
+      setOtpEmail(localLogin.email);
+      if (!stored.luna_email) {
+        setEmail(localLogin.email);
+      }
+    }
 
     if (!savedToken) {
-      if (localLogin && stored.luna_address) {
-        setAddress(stored.luna_address || null);
-        setAddresses(stored.luna_addresses || fallbackAddressSet(stored.luna_address));
+      if (localLogin) {
+        if (stored.luna_address) {
+          setAddress(stored.luna_address || null);
+          setAddresses(stored.luna_addresses || fallbackAddressSet(stored.luna_address));
+        }
         setScreen('locked');
       } else {
         setScreen('onboard');
@@ -280,8 +290,24 @@ const PopupApp: React.FC = () => {
     }
 
     try { await apiRequest('/auth/me', {}, savedToken); } catch {
-      await chrome.storage.local.remove(['luna_jwt', 'luna_email', 'luna_address', 'luna_addresses', 'luna_unlocked']);
-      setToken(null); setEmail(null); setAddress(null); setAddresses(null); setScreen('onboard'); return;
+      // JWT may expire while local encrypted wallet data is still valid for password unlock.
+      await chrome.storage.local.remove(['luna_jwt', 'luna_unlocked']);
+      setToken(null);
+
+      const fallbackAddress = stored.luna_address || null;
+      const fallbackAddresses = stored.luna_addresses || (fallbackAddress ? fallbackAddressSet(fallbackAddress) : null);
+
+      if (localLogin) {
+        if (fallbackAddress && fallbackAddresses) {
+          setAddress(fallbackAddress);
+          setAddresses(fallbackAddresses);
+        }
+        setEmail(localLogin.email);
+        setScreen('locked');
+      } else {
+        setScreen('onboard');
+      }
+      return;
     }
 
     const sessionStore = await chrome.storage.session.get('luna_session_private_key');
@@ -291,7 +317,10 @@ const PopupApp: React.FC = () => {
     const savedAddress = stored.luna_address || null;
     const savedAddresses = stored.luna_addresses || (savedAddress ? fallbackAddressSet(savedAddress) : null);
 
-    if (!savedAddress || !savedAddresses) { setScreen(localLogin ? 'locked' : 'onboard'); return; }
+    if (!savedAddress || !savedAddresses) {
+      setScreen(localLogin ? 'locked' : 'onboard');
+      return;
+    }
     setAddress(savedAddress); setAddresses(savedAddresses);
 
     if (stored.luna_unlocked && savedPk) {
@@ -372,6 +401,7 @@ const PopupApp: React.FC = () => {
 
       await apiRequest('/wallet/store-shards', { method: 'POST', body: JSON.stringify({ str1_1: s1_1, str2_1: s2_1 }) }, token);
       await writeLocalLoginRecord(otpEmail, str1);
+      setHasLocalUnlock(true);
 
       const backup = JSON.stringify({ str1_2: s1_2, str2_2: s2_2, email: otpEmail, version: 2 }, null, 2);
       setBackupFileContent(backup);
@@ -402,6 +432,7 @@ const PopupApp: React.FC = () => {
       const fullStr = combineStrings(shards.str1_1, uploadedBackup!.str1_2);
       const pk = await decryptKey(fullStr, setupPassword);
       await writeLocalLoginRecord(otpEmail || email || uploadedBackup!.email, fullStr);
+      setHasLocalUnlock(true);
       setSessionPrivateKey(pk);
       await chrome.storage.session.set({ luna_session_private_key: pk });
       const nextAddrs = await ensureAddress(token!, network, pk);
@@ -438,6 +469,7 @@ const PopupApp: React.FC = () => {
       const fullStr = combineStrings(shards.str1_1, uploadedBackup.str1_2);
       const pk = await decryptKey(fullStr, setupPassword);
       await writeLocalLoginRecord(otpEmail || email || uploadedBackup.email, fullStr);
+      setHasLocalUnlock(true);
       setSessionPrivateKey(pk);
       await chrome.storage.session.set({ luna_session_private_key: pk });
       const nextAddrs = await ensureAddress(token, network, pk);
@@ -489,6 +521,7 @@ const PopupApp: React.FC = () => {
       );
 
       await writeLocalLoginRecord(otpEmail || email || uploadedBackup.email, result.encryptedStr1);
+      setHasLocalUnlock(true);
       setBackupFileContent(result.backupFileContent);
       setBackupDownloaded(false);
       setScreen('download_backup');
@@ -549,7 +582,39 @@ const PopupApp: React.FC = () => {
     await chrome.storage.session.remove('luna_session_private_key');
     setToken(null); setSessionPrivateKey(null); setEmail(null); setAddress(null); setAddresses(null);
     setBalance('0'); setOtpCode(''); setOtpEmail(''); setSetupPassword(''); setUploadedBackup(null);
+    setHasLocalUnlock(false);
     setScreen('onboard');
+  }
+
+  async function startOtpSignIn() {
+    // Move to OTP auth without wiping local encrypted wallet data.
+    await chrome.storage.local.remove(['luna_jwt', 'luna_email', 'luna_unlocked']);
+    await chrome.storage.session.remove('luna_session_private_key');
+
+    const localLogin = await readLocalLoginRecord();
+
+    setToken(null);
+    setSessionPrivateKey(null);
+    setEmail(localLogin?.email || null);
+    setOtpEmail(localLogin?.email || otpEmail);
+    setOtpCode('');
+    setSetupPassword('');
+    setStatusText('');
+    setHasLocalUnlock(!!localLogin);
+    setScreen('onboard');
+  }
+
+  async function backToPasswordUnlock() {
+    const localLogin = await readLocalLoginRecord();
+    if (!localLogin) {
+      setStatusText('No local wallet found on this device.');
+      return;
+    }
+
+    setOtpEmail(localLogin.email);
+    setEmail(localLogin.email);
+    setScreen('locked');
+    setStatusText('');
   }
 
   async function unlockWithLocalPassword() {
@@ -559,7 +624,7 @@ const PopupApp: React.FC = () => {
     setStatusText('');
     try {
       const localLogin = await readLocalLoginRecord();
-      const loginEmail = otpEmail || email || '';
+      const loginEmail = otpEmail || email || localLogin?.email || '';
       if (!localLogin || !localLoginMatches(localLogin, loginEmail)) {
         setStatusText('No local wallet found for this email. Use Recover Wallet.');
         setBusy(false);
@@ -573,6 +638,7 @@ const PopupApp: React.FC = () => {
       const nextAddrs = await ensureAddress(token || '', network, pk);
       setAddress(nextAddrs.shielded);
       setAddresses(nextAddrs);
+      setOtpEmail(loginEmail || localLogin.email);
       await writeStorage({ luna_unlocked: true, luna_email: loginEmail || localLogin.email });
 
       setScreen('wallet');
@@ -616,6 +682,7 @@ const PopupApp: React.FC = () => {
             <div style={ui.card}><p style={{ fontSize: 13, opacity: 0.95, lineHeight: 1.5 }}>Sign in with email OTP to create or access your wallet.</p></div>
             <input value={otpEmail} onChange={(e) => setOtpEmail(e.target.value)} placeholder="Email" style={ui.input} />
             <button disabled={busy || !otpEmail} onClick={() => void requestOtp()} style={ui.buttonPrimary}>{busy ? 'Sending...' : 'Send OTP'}</button>
+            {hasLocalUnlock && <button onClick={() => void backToPasswordUnlock()} style={ui.button}>Back to Password Unlock</button>}
             <button onClick={() => setScreen('recover')} style={ui.button}>Recover Wallet</button>
             <button onClick={() => setScreen('forgot')} style={ui.button}>Forgot Password</button>
           </div>
@@ -626,6 +693,8 @@ const PopupApp: React.FC = () => {
             <div style={ui.card}><p style={{ fontSize: 13 }}>Enter the 6-digit code sent to <strong>{otpEmail}</strong></p></div>
             <input value={otpCode} onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))} maxLength={6} placeholder="000000" style={{ ...ui.input, textAlign: 'center', fontSize: 20, letterSpacing: '0.3em' }} />
             <button disabled={busy || otpCode.length !== 6} onClick={() => void verifyOtpAndRoute()} style={ui.buttonPrimary}>{busy ? 'Verifying...' : 'Verify OTP'}</button>
+            {hasLocalUnlock && <button onClick={() => void backToPasswordUnlock()} style={ui.button}>Back to Password Unlock</button>}
+            <button onClick={() => setScreen('onboard')} style={ui.button}>Back</button>
           </div>
         )}
 
@@ -717,7 +786,7 @@ const PopupApp: React.FC = () => {
             <button disabled={busy || !setupPassword} onClick={() => void unlockWithLocalPassword()} style={ui.buttonPrimary}>{busy ? 'Unlocking...' : 'Unlock Wallet'}</button>
             <button onClick={() => setScreen('recover')} style={ui.button}>Use Recover Wallet</button>
             <button onClick={() => setScreen('forgot')} style={ui.button}>Forgot Password</button>
-            <button onClick={() => void logout()} style={ui.button}>Sign In with OTP</button>
+            <button onClick={() => void startOtpSignIn()} style={ui.button}>Sign In with OTP</button>
           </div>
         )}
 
