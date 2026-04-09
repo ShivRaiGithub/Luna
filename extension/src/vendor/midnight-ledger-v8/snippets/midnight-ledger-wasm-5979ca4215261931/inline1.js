@@ -1,0 +1,1 @@
+import * as wasm from '../../midnight_ledger_wasm_bg.js'; export function UnshieldedOffer_() { return wasm.UnshieldedOffer; }
