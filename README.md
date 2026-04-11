@@ -121,31 +121,6 @@ Hence, to access the part on server, you need email access and otp. To access th
 
 
 
-
-## 🌐 dApp Integration
-
-dApps can connect to Luna using the injected `window.luna` provider:
-
-```javascript
-// Check if Luna is installed
-if (window.luna?.isLuna) {
-  // Connect wallet
-  const { address } = await window.luna.connect();
-  console.log('Connected:', address);
-
-  // Send a transaction
-  const { txHash } = await window.luna.signAndSubmit({
-    to: 'mn1abc...',
-    amount: '5.0',
-    memo: 'Payment',
-  });
-
-  // Listen for events
-  window.luna.on('connect', ({ address }) => console.log('Connected:', address));
-  window.luna.on('disconnect', () => console.log('Disconnected'));
-}
-```
-
 ---
 
 ## 📄 License
